@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>HumEight — hum it over your chords, get a DAW-ready line</title>
+  <meta name="description" content="Hum 8 bars over your own chords at your own BPM. HumEight pitch-tracks it, snaps it to your key and grid, plays it on a real flute or piano with the band, and exports WAV + MIDI that sit on bar 1." />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div class="tap" id="tap"><button id="tapBtn">Tap to start audio</button><p>iOS: the silent switch mutes Web Audio. Flip it off to hear the band.</p></div>
+<main>
+  <p class="eyebrow">WorkinWithAI · live chairs</p>
+  <h1>HumEight</h1>
+  <p class="lead">The melody is in your head; the DAW is in the way. Type your BPM and 4 chords, put on headphones, and hum 8 bars over a real band (FluidR3 piano, upright bass, strings, CC0 kit). HumEight pitch-tracks the take in your browser, snaps it to your key and grid, and plays it back on a real flute or grand piano. Export WAV + a multi-track MIDI where your line is its own track, on the grid from bar 1. No upload, no AI vocals, nothing leaves your machine.</p>
+  <p class="status" id="status">Seating chairs…</p>
+  <p class="eyebrow">Your loop</p>
+  <div class="row inputs">
+    <label>BPM <input id="bpm" type="number" min="60" max="180" step="1" /></label>
+    <label>Key (chord 1 root) <select id="key"></select></label>
+    <label class="grow">4 chords <input id="chords" placeholder="Am F C G" /><small id="chordErr"></small></label>
+    <label>Bars <select id="bars"><option>4</option><option selected>8</option><option>16</option></select></label>
+  </div>
+  <p class="eyebrow">Groove</p>
+  <div class="row" id="grooves"></div>
+  <p class="eyebrow">Your line</p>
+  <section class="live">
+  <div class="row inputs">
+    <label>Mic / input <select id="audioIn"><option value="">System default mic</option></select></label>
+    <label>Line plays on <select id="leadInst"><option value="flute">Flute (FluidR3)</option><option value="piano">Grand piano (FluidR3)</option></select></label>
+    <label>Latency trim (ms) <input id="latencyMs" type="number" min="-300" max="300" step="5" /></label>
+    <label>Input level <meter id="inMeter" min="0" max="1" low="0.2" high="0.9" optimum="0.5" value="0"></meter></label>
+  </div>
+  <div class="row inputs">
+    <button class="mini" id="recBtn">● Record hum</button>
+    <label class="chk"><span>or load a voice memo <input type="file" id="humFile" accept="audio/*" /></span></label>
+    <label class="chk"><span><input type="checkbox" id="fileStartsAtSound" /> memo starts at its first sound (= bar 1)</span></label>
+    <button class="mini" id="demoHum">Use demo line</button>
+  </div>
+  <p class="status" id="humSrc"></p>
+  <p class="status" id="audioInNote">Wear headphones so the band doesn't leak into the mic. One bar of count-in, then 8 bars. Hum "doo" or "da" with clear starts. Pitch tracking runs on this device.</p>
+  </section>
+  <p class="eyebrow">Snap</p>
+  <div class="row" id="recipes"></div>
+  <p class="eyebrow">Chairs</p>
+  <div class="row" id="chairs"></div>
+  <p class="eyebrow">8 bars · your chords × 2 · your line</p>
+  <div class="bars" id="bars8"></div>
+  <p class="eyebrow">Play along live</p>
+  <section class="live">
+  <div class="row inputs">
+    <label>MIDI in <select id="midiIn"><option value="">(none)</option></select></label>
+    <label>Notes do <select id="midiInMode"><option value="play">Play the live instrument</option><option value="chords">Chord entry (chord = next slot)</option></select></label>
+    <label>Live instrument <select id="liveInst"><option value="piano">Grand piano</option><option value="flute">Flute (hold)</option><option value="bass">Upright bass</option><option value="strings">String ensemble (hold)</option></select></label>
+    <label>Live level <input id="liveGainIn" type="range" min="0" max="1" step="0.01" /></label>
+    <label class="chk"><span><input type="checkbox" id="midiTransport" /> MIDI Start/Stop messages run transport</span></label>
+  </div>
+  <p id="liveHint" class="hint"></p>
+  <div class="kbrow"><button class="mini" id="liveOctDn" aria-label="Octave down">◀</button><div id="miniKeys" class="minikeys"></div><button class="mini" id="liveOctUp" aria-label="Octave up">▶</button><small id="liveOctLbl"></small></div>
+  <p class="status">Computer keys: A W S E D F T G Y H U J K play C to C, Z / X change octave. Velocity and sustain pedal (CC64) work from a MIDI keyboard. Highlighted keys are the tones of the chord playing now.</p>
+  <div class="row inputs">
+    <label class="chk"><span><input type="checkbox" id="liveRec" /> Record what I play while the band runs</span></label>
+    <label class="chk"><span><input type="checkbox" id="liveQuant" /> Quantize take to 16ths</span></label>
+    <button class="mini" id="liveClear">Clear take</button> <small id="liveTakeInfo" class="status"></small>
+  </div>
+  </section>
+  <p class="eyebrow">Audio output</p>
+  <div class="row inputs"><label>Output device <select id="audioOut"><option value="">System default</option></select></label><small id="audioOutNote" class="status"></small></div>
+  <p class="eyebrow">Web MIDI out</p>
+  <div class="row inputs">
+    <label>Out <select id="midiOut"><option value="">(none)</option></select></label>
+    <small id="midiNote">Out: kit ch10, upright ch1, piano ch2, strings ch3, your line ch5. Live take exports on ch4.</small>
+  </div>
+  <p class="eyebrow">License</p>
+  <div class="row inputs"><span id="licState" class="status"></span><input id="licKey" placeholder="Lemon Squeezy license key" /><button class="mini" id="licBtn">Unlock</button><button class="mini" id="licOff" hidden>Remove key</button><a class="mini" id="buy" target="_blank" rel="noopener">Buy</a></div>
+  <h2>Punch list</h2>
+  <pre id="punch"></pre>
+  <p class="status">Samples: FluidR3_GM (Frank Wen, CC BY 3.0) via gleitz/midi-js-soundfonts pinned @044fab8; flute + the rest from the same FluidR3 set; acoustic kit from Virtuosity Drums (CC0) pinned @9f04cf9. iOS: the silent switch mutes Web Audio.</p>
+</main>
+<div class="dock">
+  <button id="playA">A · Band only</button>
+  <button id="playB">B · Band + your line</button>
+  <button class="ghost" id="stop">Stop</button>
+  <button class="ghost" id="exportWav">Export WAV</button>
+  <button class="ghost" id="exportMid">Export MIDI</button>
+  <button class="ghost" id="copy">Copy punch</button>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
