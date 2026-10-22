@@ -59,3 +59,7 @@ main{padding-bottom:180px}
 
 .roll{position:relative;height:46px;margin-top:6px;border-top:1px dashed var(--line)}.roll i{position:absolute;height:4px;background:var(--accent);border-radius:2px}
 meter{width:140px;height:18px}
+
+.takes{display:flex;flex-direction:column;gap:6px;margin:8px 0}.take{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#171816;border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+.take.aud{border-color:var(--accent)}.take.rec{box-shadow:0 0 0 1px #e05555}.take .tname{width:110px}.take small{color:var(--muted);flex:1;min-width:140px}
+.take button{background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:999px;padding:6px 12px;cursor:pointer}

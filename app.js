@@ -163,7 +163,7 @@ async function ensureCtx(){
 function start(m){
   if(!ctx||ctx.state!=="running"||!liveBufs||missing.size) return;
   stop(); mode=m; startBar = 0; loopBars = 8;
-  nextStepTime=ctx.currentTime+0.1; step=0; stepLog.length=0; playing=true;
+  nextStepTime=ctx.currentTime+0.1; step=0; stepLog.length=0; playing=true; session++; passNo=0;
   timerId=setInterval(scheduler, LOOKAHEAD_MS); scheduler(); requestAnimationFrame(draw);
 }
 function scheduler(){ while(nextStepTime < ctx.currentTime+SCHEDULE_AHEAD){ scheduleStep(step, nextStepTime); nextStepTime += 60/state.bpm/4; step=(step+1)%(loopBars*STEPS); } }
@@ -171,12 +171,13 @@ function scheduleStep(st, time){
   const sd=60/state.bpm/4, abs = startBar*STEPS + st, live = Object.assign({}, state, {mutes:Object.assign({},state.mutes, (mode==="band"||mode==="rec")?{lead:true}:{})});
   const evs = stepEvents(abs, live, prog);
   for(const ev of evs){ voice(ctx, liveBufs, bus.chairs[ev.part], ev, time, sd, true); midiSend(ev, time, sd); }
-  stepLog.push({bar:Math.floor(abs/STEPS), s:abs%STEPS, time});
+  if(st===0) passNo++; stepLog.push({bar:Math.floor(abs/STEPS), s:abs%STEPS, st, pass:passNo, time}); scheduleTakes(st,time,sd);
   if(mode==="rec" && st===loopBars*STEPS-1) recEndAt = time + sd; if(stepLog.length>256) stepLog.shift();
   window.__schedLog.push({step:abs, time, bpm:state.bpm, recipe:state.recipe, mutes:Object.assign({},state.mutes), notes:evs.map(e=>e.part+":"+e.note)});
   if(window.__schedLog.length>3000) window.__schedLog.shift();
 }
 function stop(){
+  closeAllRec();
   clearInterval(timerId); timerId=null; playing=false; mode=null;
   for(const s of active){ try{ s.stop(); }catch(e){} } active.clear();
   if(midiOut) for(const c of CHAIRS) midiOut.send([0xB0|c.ch,123,0]);
@@ -207,11 +208,12 @@ async function renderLoop(o){
   const st=merged(o), N=Math.round(st.bars*4*60/st.bpm*SR), TAIL=Math.round(3*SR), D=await measureCompLatency();
   const oc=new OfflineAudioContext(2, D+N+TAIL, SR), bufs=await decodeAll(oc), b=buildBus(oc, st.gains), sd=60/st.bpm/4;
   for(let s=0;s<st.bars*STEPS;s++) for(const ev of stepEvents(s, st, prog)) voice(oc, bufs, b.chairs[ev.part], ev, s*sd, sd, false);
-  if(liveTake.notes.length){ const lg=oc.createGain(); lg.gain.value=st.liveGain; lg.connect(b.comp); for(const ev of takeEvents(st)) voice(oc, bufs, lg, ev, ev.pos*sd, sd, false); }
+  const tk=st.onlyTake?[st.onlyTake]:(st.noTakes?[]:takes.filter(audible));
+  if(tk.length){ const lg=oc.createGain(); lg.gain.value=st.liveGain; lg.connect(b.comp); for(const t of tk) for(const ev of takeEvents(t,st)) voice(oc, bufs, lg, ev, ev.pos*sd, sd, false); }
   const buf=await oc.startRendering();
   const ch=[0,1].map(i=>{ const d=buf.getChannelData(i), x=new Float32Array(N); x.set(d.subarray(D,D+N)); for(let j=0;j<TAIL;j++) x[j]+=d[D+N+j]; return x; });
   let pk=0; for(const d of ch) for(let i=0;i<N;i++){ const a=Math.abs(d[i]); if(a>pk) pk=a; }
-  const k=pk>0?Math.pow(10,-1.1/20)/pk:1; for(const d of ch) for(let i=0;i<N;i++) d[i]*=k;
+  let k=pk>0?Math.pow(10,-1.1/20)/pk:1; if(st.stem) k=Math.min(1,k); /* stems keep their level, only pulled down if hot */ for(const d of ch) for(let i=0;i<N;i++) d[i]*=k;
   return {ch,N,st};
 }
 function wav24(ch,N){ const nc=2,len=N*nc*3,b=new ArrayBuffer(44+len),v=new DataView(b); let p=0;
@@ -230,8 +232,8 @@ function midiFile(st){
       evs.push({t:s*T,o:2,b:[0x90|c.ch,ev.note,v]}); evs.push({t:(s+ev.dur)*T,o:1,b:[0x80|c.ch,ev.note,0]}); }
     if(c.id==="lead") evs[0]={t:0,o:0,b:name("Hummed line ("+LEADS[st.leadInst]+")")};
     tracks.push(trk(evs)); }
-  if(liveTake.notes.length){ const evs=[{t:0,o:0,b:name("Live ("+CHAIRS.find(c=>c.id===liveTake.inst).name+")")}];
-    for(const ev of takeEvents(st)){ const v=Math.max(1,Math.round(ev.vel*127)); evs.push({t:Math.round(ev.pos*T),o:2,b:[0x93,ev.note,v]}); evs.push({t:Math.round((ev.pos+ev.dur)*T),o:1,b:[0x83,ev.note,0]}); }
+  for(const tk of takes){ if(!tk.notes.length) continue; const evs=[{t:0,o:0,b:name(tk.name)}];
+    for(const ev of takeEvents(tk,st)){ const v=Math.max(1,Math.round(ev.vel*127)); evs.push({t:Math.round(ev.pos*T),o:2,b:[0x93,ev.note,v]}); evs.push({t:Math.round((ev.pos+ev.dur)*T),o:1,b:[0x83,ev.note,0]}); }
     tracks.push(trk(evs)); }
   return new Uint8Array([].concat([0x4D,0x54,0x68,0x64,0,0,0,6,0,1,0,tracks.length,PPQ>>8,PPQ&255],...tracks));
 }
@@ -284,7 +286,7 @@ function onMidi(e){ const d=e.data, s=d[0], cmd=s&0xF0, n=d[1], v=d[2];
 // ---------- live play-along: MIDI keyboard / computer keys / on-screen keys -> the desk's real samples ----------
 // Immediate trigger at ctx.currentTime. Runs beside the lookahead scheduler and never touches its state.
 const liveRange=id=>[RANGE[id][0]-MAX_SHIFT, RANGE[id][1]+MAX_SHIFT];
-const liveVoices=new Map(); let sustain=false, liveGainNode=null; const liveTake={inst:"piano",notes:[]}; const liveOpen=new Map();
+const liveVoices=new Map(); let sustain=false, liveGainNode=null; const liveOpen=new Map(); let session=0, passNo=0;
 window.__liveLog=[];
 const setStatus=t=>{ document.getElementById("status").textContent=t; };
 function liveDest(){ if(!liveGainNode){ liveGainNode=ctx.createGain(); liveGainNode.gain.value=state.liveGain; liveGainNode.connect(bus.comp); } return liveGainNode; }
@@ -302,7 +304,7 @@ function liveOn(note,vel,src){
   const vo={s,g,id,vg,sustained:false,done:false}; s.onended=()=>{ vo.done=true; if(liveVoices.get(key)===vo) liveVoices.delete(key); };
   liveVoices.set(key,vo); keyVis(note,true);
   window.__liveLog.push({ev:"on",note,n,vel,src,perf:performance.now(),startAt:t,ctxNow:ctx.currentTime}); if(window.__liveLog.length>500) window.__liveLog.shift();
-  if(state.liveRec&&playing){ const p=transportPos(t); if(p!==null){ liveOpen.set(key,{note:n,vel,pos:p}); liveTake.inst=id; } } recUI();
+  if(state.liveRec&&playing&&mode!=="rec"){ const p=transportPos(t); if(p){ const tk=takeFor(p.pass,id); if(tk) liveOpen.set(key,{note:n,vel,pos:p.pos,take:tk}); } }
 }
 function releaseVoice(vo,t){ if(vo.done) return; vo.done=true; const rel=REL[vo.id]||0.1, g=vo.g.gain;
   g.cancelScheduledValues(t); g.setValueAtTime(g.value,t); g.linearRampToValueAtTime(0,t+rel); try{ vo.s.stop(t+rel+0.02); }catch(e){} }
@@ -311,14 +313,65 @@ function liveOff(note,src){ const key=src+":"+note, vo=liveVoices.get(key); keyV
   if(!vo) return; if(sustain){ vo.sustained=true; return; } liveVoices.delete(key); releaseVoice(vo,ctx.currentTime); }
 function setSustain(down){ sustain=down; if(!down&&ctx) for(const [k,vo] of liveVoices) if(vo.sustained){ liveVoices.delete(k); releaseVoice(vo,ctx.currentTime); } }
 function liveAllOff(){ if(!ctx) return; for(const [,vo] of liveVoices) releaseVoice(vo,ctx.currentTime); liveVoices.clear(); sustain=false; document.querySelectorAll(".mk.down").forEach(k=>k.classList.remove("down")); }
-function transportPos(t){ let cur=null; for(const e of stepLog){ if(e.time<=t) cur=e; else break; } if(!cur) return null; return cur.bar*STEPS+cur.s+(t-cur.time)/(60/state.bpm/4); }
-function closeRec(key){ const o=liveOpen.get(key); if(!o||!ctx) return; liveOpen.delete(key); const p=transportPos(ctx.currentTime);
-  let dur=p===null?1:p-o.pos; if(dur<=0) dur+=loopBars*STEPS; liveTake.notes.push({note:o.note,vel:o.vel,pos:o.pos,dur:Math.max(0.25,dur)}); recUI(); }
-function takeEvents(st){ const L=st.bars*STEPS, out=[]; // aligned to the form grid; quantize to 16ths only if chosen
-  for(const x of liveTake.notes){ let pos=x.pos, dur=x.dur; if(st.liveQuant){ pos=Math.round(pos); dur=Math.max(1,Math.round(dur)); }
-     pos=((pos%L)+L)%L; out.push({part:liveTake.inst,note:foldNote(liveTake.inst,x.note),vel:x.vel,pos,dur:Math.min(dur,L-pos)}); }
+// position of audio time t inside the running loop (16th steps, fractional) + which loop pass, from the scheduler's own step log
+function transportPos(t){ let cur=null; for(const e of stepLog){ if(e.time<=t) cur=e; else break; } if(!cur) return null;
+  return {pos:cur.st+(t-cur.time)/(60/state.bpm/4), pass:cur.pass}; }
+// ---- takes: every loop pass while recording is a NEW take; persisted so nothing is lost on reload ----
+const TAKE_CAP=16, TAKE_KEY=APP+'-takes';
+const takes=(()=>{ try{ const a=JSON.parse(localStorage.getItem(TAKE_KEY)||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } })();
+let recTake=null; // take being recorded in the current pass
+function saveTakes(){ try{ localStorage.setItem(TAKE_KEY,JSON.stringify(takes)); }catch(e){ setStatus('Could not save takes in this browser (storage full?). Export them now.'); } }
+const audible=t=>t.mode==='loop'&&!t.muted&&t.notes.length>0;
+function takeFor(pass,inst){
+  if(recTake&&recTake.session===session&&recTake.pass===pass) return recTake;
+  if(takes.length>=TAKE_CAP){ setStatus(`Take limit (${TAKE_CAP}) reached. Export or delete takes to record more.`); return null; }
+  const n=takes.reduce((m,t)=>Math.max(m,t.n),0)+1;
+  for(const t of takes) if(t.mode==='loop') t.mode='silent'; // only the newest take is audible by default
+  recTake={id:Date.now()+'-'+n,n,name:'Take '+n,inst,bars:loopBars,bpm:state.bpm,mode:'loop',muted:false,notes:[],session,pass};
+  takes.push(recTake); saveTakes(); renderTakes(); return recTake; }
+function closeRec(key,atEnd){ const o=liveOpen.get(key); if(!o||!ctx) return; liveOpen.delete(key);
+  const L=o.take.bars*STEPS, p=atEnd?null:transportPos(ctx.currentTime);
+  // a note held past the loop boundary (or past stop) ends at the boundary in its own take
+  let end = (p&&p.pass===o.take.pass&&o.take.session===session&&p.pos>=o.pos) ? p.pos : L;
+  o.take.notes.push({note:o.note,vel:+o.vel.toFixed(3),pos:+o.pos.toFixed(4),dur:+Math.max(0.25,Math.min(end,L)-o.pos).toFixed(4)});
+  saveTakes(); renderTakes(); }
+function closeAllRec(){ for(const k of [...liveOpen.keys()]){ const o=liveOpen.get(k); const p=ctx?transportPos(ctx.currentTime):null;
+    closeRec(k, !(p&&p.pass===o.take.pass)); } recTake=null; }
+function takeEvents(tk,st){ const L=st.bars*STEPS, out=[]; // every take starts at bar 1 on the grid; quantize to 16ths only if chosen
+  for(const x of tk.notes){ let pos=x.pos, dur=x.dur; if(st.liveQuant){ pos=Math.round(pos); dur=Math.max(1,Math.round(dur)); }
+    if(pos>=L||pos<0) continue; out.push({part:tk.inst,note:foldNote(tk.inst,x.note),vel:x.vel,pos,dur:Math.min(dur,L-pos)}); }
   return out.sort((a,b)=>a.pos-b.pos); }
-function recUI(){ const el=document.getElementById("liveTakeInfo"); if(el) el.textContent=liveTake.notes.length?`Live take: ${liveTake.notes.length} notes, added to WAV + MIDI exports`:"No live take (exports unchanged)"; }
+// Loop-mode takes play back with the band (reads current take state each step, like every other control)
+function scheduleTakes(st,time,sd){ if(!liveBufs||mode==="rec") return; // never bleed takes into a hum recording
+  for(const tk of takes){ if(!audible(tk)||tk===recTake) continue; const L=tk.bars*STEPS, loc=st%L;
+    for(const ev of takeEvents(tk,{bars:tk.bars,liveQuant:state.liveQuant})) if(Math.floor(ev.pos)===loc) voice(ctx,liveBufs,liveDest(),ev,time+(ev.pos-loc)*sd,sd,true); } }
+function recUI(){ renderTakes(); }
+function renderTakes(){ const box=document.getElementById('takes'), info=document.getElementById('liveTakeInfo'); if(!box) return;
+  if(info) info.textContent=takes.length?`${takes.length} take${takes.length>1?'s':''} saved (max ${TAKE_CAP}). WAV/MIDI include takes set to Loop and not muted; MIDI lists every take.`:'No takes yet. Tick Record, press Play, and play: each loop pass becomes a new take.';
+  box.innerHTML=takes.map((t,i)=>`<div class="take${audible(t)?' aud':''}${t===recTake?' rec':''}" data-i="${i}">
+   <input class="tname" value="${t.name.replace(/"/g,'&quot;')}" data-act="name" aria-label="Take name">
+   <small>${t.notes.length} notes · ${CHAIRS.find(c=>c.id===t.inst).name} · ${t.bars} bars</small>
+   <select data-act="mode"><option value="loop"${t.mode==='loop'?' selected':''}>Loop</option><option value="silent"${t.mode==='silent'?' selected':''}>Silent</option></select>
+   <label class="chk"><span><input type="checkbox" data-act="mute"${t.muted?' checked':''}> Mute</span></label>
+   <button data-act="del">Delete</button></div>`).join(''); }
+document.getElementById('takes').addEventListener('change',e=>{ const row=e.target.closest('.take'); if(!row) return; const t=takes[+row.dataset.i], a=e.target.dataset.act;
+  if(a==='mode') t.mode=e.target.value; if(a==='mute') t.muted=e.target.checked; if(a==='name') t.name=e.target.value.trim()||('Take '+t.n); saveTakes(); renderTakes(); });
+document.getElementById('takes').addEventListener('click',e=>{ if(e.target.dataset.act!=='del') return; const i=+e.target.closest('.take').dataset.i, t=takes[i];
+  if(!confirm(`Delete ${t.name}? This can't be undone.`)) return; if(t===recTake) recTake=null; takes.splice(i,1); saveTakes(); renderTakes(); });
+// per-take WAV stems (band excluded, exact length), zipped
+function crc32(b){ let c,crc=-1; for(let i=0;i<b.length;i++){ c=(crc^b[i])&255; for(let k=0;k<8;k++) c=c&1?(c>>>1)^0xEDB88320:c>>>1; crc=(crc>>>8)^c; } return (crc^-1)>>>0; }
+function zipStore(files){ const parts=[], cen=[]; let off=0; const enc=new TextEncoder();
+  const le=(n,w)=>{ const a=[]; for(let i=0;i<w;i++) a.push((n>>>(8*i))&255); return a; };
+  for(const f of files){ const nm=enc.encode(f.name), c=crc32(f.bytes), sz=f.bytes.length;
+    const h=new Uint8Array([0x50,0x4B,3,4,20,0,0,0,0,0,0,0,0x21,0,...le(c,4),...le(sz,4),...le(sz,4),...le(nm.length,2),0,0,...nm]);
+    parts.push(h,f.bytes); cen.push(new Uint8Array([0x50,0x4B,1,2,20,0,20,0,0,0,0,0,0,0,0x21,0,...le(c,4),...le(sz,4),...le(sz,4),...le(nm.length,2),0,0,0,0,0,0,0,0,0,0,0,0,...le(off,4),...nm]));
+    off+=h.length+sz; }
+  const cl=cen.reduce((a,x)=>a+x.length,0), end=new Uint8Array([0x50,0x4B,5,6,0,0,0,0,...le(files.length,2),...le(files.length,2),...le(cl,4),...le(off,4),0,0]);
+  const out=new Uint8Array(off+cl+end.length); let p=0; for(const x of [...parts,...cen,end]){ out.set(x,p); p+=x.length; } return out; }
+async function exportStemsBytes(o){ const list=takes.filter(t=>t.notes.length); if(!list.length) throw new Error('No takes to export');
+  const files=[]; for(const t of list){ const r=await renderLoop(Object.assign({},o,{onlyTake:t,stem:true,mutes:{kit:true,bass:true,piano:true,strings:true,lead:true}}));
+    files.push({name:`${APP}-take${t.n}-${r.st.bpm}bpm-${keyLabel()}.wav`,bytes:wav24(r.ch,r.N),frames:r.N}); }
+  return {files, zip:zipStore(files), name:`${APP}-takes-${merged(o).bpm}bpm-${keyLabel()}.zip`}; }
 const KEYMAP="awsedftgyhujk"; const kbBase=()=>12*(state.liveOct+1);
 document.addEventListener("keydown",e=>{ if(e.repeat||e.metaKey||e.ctrlKey||e.altKey) return; const tg=e.target.tagName; if(tg==="INPUT"||tg==="SELECT"||tg==="TEXTAREA") return;
   const k=e.key.toLowerCase(), i=KEYMAP.indexOf(k);
@@ -346,7 +399,7 @@ function keyVis(n,on){ const k=document.querySelector(`.mk[data-n="${n}"]`); if(
   box.addEventListener("pointerover",e=>{ if(!down.has(e.pointerId)||e.buttons===0) return; const k=e.target.closest(".mk"); if(!k) return; const n=+k.dataset.n;
     if(n!==down.get(e.pointerId)){ liveOff(down.get(e.pointerId),"tap"); down.set(e.pointerId,n); liveOn(n,0.8,"tap"); } });
   box.addEventListener("contextmenu",e=>e.preventDefault()); }
-window.__live={liveOn,liveOff,setSustain,take:liveTake,voices:liveVoices,get sustain(){return sustain;}};
+window.__live={liveOn,liveOff,setSustain,takes,exportStemsBytes,tpos:()=>ctx&&transportPos(ctx.currentTime),voices:liveVoices,get sustain(){return sustain;}};
 function refreshMidi(){ if(!midiAccess) return;
   const fill=(sel,ports,cur)=>{ sel.innerHTML='<option value="">(none)</option>'+[...ports.values()].map(p=>`<option value="${p.id}">${p.name}</option>`).join(""); sel.value=[...ports.keys()].includes(cur)?cur:""; };
   fill(ui.midiIn,midiAccess.inputs,state.midiIn); fill(ui.midiOut,midiAccess.outputs,state.midiOut);
@@ -457,7 +510,9 @@ ui.liveOctDn.addEventListener("click",()=>{ state.liveOct=Math.max(1,state.liveO
 ui.liveOctUp.addEventListener("click",()=>{ state.liveOct=Math.min(6,state.liveOct+1); save(); renderKeys(); });
 ui.liveRec.addEventListener("change",()=>{ state.liveRec=ui.liveRec.checked; save(); });
 ui.liveQuant.addEventListener("change",()=>{ state.liveQuant=ui.liveQuant.checked; save(); });
-ui.liveClear.addEventListener("click",()=>{ liveTake.notes.length=0; liveOpen.clear(); recUI(); });
+ui.liveClear.addEventListener("click",()=>{ if(!takes.length||!confirm(`Clear all ${takes.length} takes? This can't be undone.`)) return; takes.length=0; recTake=null; liveOpen.clear(); saveTakes(); renderTakes(); });
+document.getElementById("exportStems").addEventListener("click",async()=>{ if(!lic.valid&&state.bars>4){ setStatus("Demo: 4-bar exports. Unlock below for 8/16-bar take stems."); return; }
+  setStatus("Rendering take stems…"); try{ const r=await exportStemsBytes(); download(r.zip,r.name,"application/zip"); setStatus(`Saved ${r.name} (${r.files.length} take WAVs)`); }catch(e){ setStatus("Stems export failed: "+e.message); } });
 ui.midiIn.addEventListener("change",()=>{ state.midiIn=ui.midiIn.value; save(); refreshMidi(); });
 ui.midiOut.addEventListener("change",()=>{ state.midiOut=ui.midiOut.value; save(); refreshMidi(); });
 document.getElementById("chairs").addEventListener("input",e=>{ const m=e.target.dataset.mute, g=e.target.dataset.gain;
